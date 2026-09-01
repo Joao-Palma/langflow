@@ -3,17 +3,18 @@ import os
 from pathlib import Path
 from uuid import UUID, uuid4
 
-from aiofile import async_open
+import aiofiles
 from lfx.graph import Graph
 from lfx.graph.vertex.param_handler import ParameterHandler
 from lfx.log.logger import configure, logger
 from lfx.utils.util import update_settings
-from sqlmodel import delete, select, text
+from sqlmodel import delete, select
 
 from langflow.api.utils import cascade_delete_flow
 from langflow.load.utils import replace_tweaks_with_env
 from langflow.processing.process import process_tweaks, run_graph
 from langflow.services.cache.service import AsyncBaseCacheService
+from langflow.services.database.migration import get_current_alembic_heads
 from langflow.services.database.models import Flow, User, Variable
 from langflow.services.database.utils import initialize_database
 from langflow.services.deps import get_auth_service, get_cache_service, get_storage_service, session_scope
@@ -146,7 +147,9 @@ class LangflowRunnerExperimental:
                     tweaks[vertex.id][db_field] = field_params[db_field]
         if tweaks is not None:
             tweaks = replace_tweaks_with_env(tweaks=tweaks, env_vars=tweaks_values)
-            flow_dict = process_tweaks(flow_dict, tweaks)
+            # Built here from resolved load_from_db values, not sent by a caller,
+            # so the deployment policy does not judge them. The floor still does.
+            flow_dict = process_tweaks(flow_dict, tweaks, caller_supplied=False)
 
         # Recursively update load_from_db fields
         def update_load_from_db(obj):
@@ -244,17 +247,12 @@ class LangflowRunnerExperimental:
     @staticmethod
     async def database_exists_check():
         async with session_scope() as session:
-            try:
-                result = await session.exec(text("SELECT version_num FROM public.alembic_version"))
-                return result.first() is not None
-            except Exception as e:  # noqa: BLE001
-                await logger.adebug(f"Database check failed: {e}")
-                return False
+            return bool(await get_current_alembic_heads(session))
 
     @staticmethod
     async def get_flow_dict(flow: Path | str | dict) -> dict:
         if isinstance(flow, str | Path):
-            async with async_open(Path(flow), encoding="utf-8") as f:
+            async with aiofiles.open(Path(flow), encoding="utf-8") as f:
                 content = await f.read()
                 return json.loads(content)
         # If input is a dictionary, assume it's a JSON object

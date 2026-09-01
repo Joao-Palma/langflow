@@ -2,7 +2,6 @@ import ast
 import json
 from typing import TYPE_CHECKING, Any
 
-import jq
 from json_repair import repair_json
 
 from lfx.custom import Component
@@ -20,19 +19,11 @@ ACTION_CONFIG = {
     "Select Keys": {"is_list": False, "log_msg": "setting filter fields"},
     "Literal Eval": {"is_list": False, "log_msg": "setting evaluate fields"},
     "Combine": {"is_list": True, "log_msg": "setting combine fields"},
-    "Filter Values": {"is_list": False, "log_msg": "setting filter values fields"},
     "Append or Update": {"is_list": False, "log_msg": "setting Append or Update fields"},
     "Remove Keys": {"is_list": False, "log_msg": "setting remove keys fields"},
     "Rename Keys": {"is_list": False, "log_msg": "setting rename keys fields"},
     "Path Selection": {"is_list": False, "log_msg": "setting mapped key extractor fields"},
     "JQ Expression": {"is_list": False, "log_msg": "setting parse json fields"},
-}
-OPERATORS = {
-    "equals": lambda a, b: str(a) == str(b),
-    "not equals": lambda a, b: str(a) != str(b),
-    "contains": lambda a, b: str(b) in str(a),
-    "starts with": lambda a, b: str(a).startswith(str(b)),
-    "ends with": lambda a, b: str(a).endswith(str(b)),
 }
 
 
@@ -41,20 +32,20 @@ class DataOperationsComponent(Component):
     description = "Perform various operations on a JSON object."
     icon = "file-json"
     name = "DataOperations"
+    legacy = True
+    replacement = ["processing.Operations"]
     default_keys = ["operations", "data"]
     metadata = {
         "keywords": [
             "data",
             "json",
             "operations",
-            "filter values",
             "Append or Update",
             "remove keys",
             "rename keys",
             "select keys",
             "literal eval",
             "combine",
-            "filter",
             "append",
             "update",
             "remove",
@@ -75,7 +66,6 @@ class DataOperationsComponent(Component):
         "Select Keys": ["select_keys_input", "operations"],
         "Literal Eval": [],
         "Combine": [],
-        "Filter Values": ["filter_values", "operations", "operator", "filter_key"],
         "Append or Update": ["append_update_data", "operations"],
         "Remove Keys": ["remove_keys_input", "operations"],
         "Rename Keys": ["rename_keys_input", "operations"],
@@ -86,9 +76,6 @@ class DataOperationsComponent(Component):
     # All operation-specific input fields (used to hide and reset when no operation selected).
     ALL_OPERATION_FIELDS = [
         "select_keys_input",
-        "filter_key",
-        "operator",
-        "filter_values",
         "append_update_data",
         "remove_keys_input",
         "rename_keys_input",
@@ -145,7 +132,6 @@ class DataOperationsComponent(Component):
                 {"name": "Select Keys", "icon": "lasso-select"},
                 {"name": "Literal Eval", "icon": "braces"},
                 {"name": "Combine", "icon": "merge"},
-                {"name": "Filter Values", "icon": "filter"},
                 {"name": "Append or Update", "icon": "circle-plus"},
                 {"name": "Remove Keys", "icon": "eraser"},
                 {"name": "Rename Keys", "icon": "pencil-line"},
@@ -163,35 +149,6 @@ class DataOperationsComponent(Component):
             show=False,
             is_list=True,
             value=[],
-        ),
-        # filter values inputs
-        MessageTextInput(
-            name="filter_key",
-            display_name="Filter Key",
-            info=(
-                "Name of the key containing the list to filter. "
-                "It must be a top-level key in the JSON and its value must be a list."
-            ),
-            is_list=True,
-            show=False,
-            value=[],
-        ),
-        DropdownInput(
-            name="operator",
-            display_name="Comparison Operator",
-            options=["equals", "not equals", "contains", "starts with", "ends with"],
-            info="The operator to apply for comparing the values.",
-            value="equals",
-            advanced=False,
-            show=False,
-        ),
-        DictInput(
-            name="filter_values",
-            display_name="Filter Values",
-            info="List of values to filter by.",
-            show=False,
-            is_list=True,
-            value={},
         ),
         # update/ Append data inputs
         DictInput(
@@ -251,9 +208,6 @@ class DataOperationsComponent(Component):
     # Default values for operation fields when clearing (match input definitions)
     OPERATION_FIELD_DEFAULTS: dict[str, Any] = {
         "select_keys_input": [],
-        "filter_key": [],
-        "operator": "equals",
-        "filter_values": {},
         "append_update_data": {"key": "value"},
         "remove_keys_input": [],
         "rename_keys_input": {"old_key": "new_key"},
@@ -275,7 +229,11 @@ class DataOperationsComponent(Component):
     def json_query(self) -> Data:
         import json
 
-        import jq
+        try:
+            import jq
+        except ImportError:
+            msg = "jq is required for JQ Expression. Install with: pip install jq"
+            raise ImportError(msg) from None
 
         if not self.query or not self.query.strip():
             msg = "JSON Query is required and cannot be blank."
@@ -429,60 +387,6 @@ class DataOperationsComponent(Component):
 
         return Data(**combined_data)
 
-    def filter_data(self, input_data: list[dict[str, Any]], filter_key: str, filter_value: str, operator: str) -> list:
-        """Filter list data based on key, value, and operator."""
-        # Validate inputs
-        if not input_data:
-            self.status = "Input data is empty."
-            return []
-
-        if not filter_key or not filter_value:
-            self.status = "Filter key or value is missing."
-            return input_data
-
-        # Filter the data
-        filtered_data = []
-        for item in input_data:
-            if isinstance(item, dict) and filter_key in item:
-                if self.compare_values(item[filter_key], filter_value, operator):
-                    filtered_data.append(item)
-            else:
-                self.status = f"Warning: Some items don't have the key '{filter_key}' or are not dictionaries."
-
-        return filtered_data
-
-    def compare_values(self, item_value: Any, filter_value: str, operator: str) -> bool:
-        comparison_func = OPERATORS.get(operator)
-        if comparison_func:
-            return comparison_func(item_value, filter_value)
-        return False
-
-    def multi_filter_data(self) -> Data:
-        """Apply multiple filters to the data."""
-        self.validate_single_data("Filter Values")
-        data_filtered = self.get_normalized_data()
-
-        for filter_key in self.filter_key:
-            if filter_key not in data_filtered:
-                msg = f"Filter key '{filter_key}' not found in data. Available keys: {list(data_filtered.keys())}"
-                raise ValueError(msg)
-
-            if isinstance(data_filtered[filter_key], list):
-                for filter_data in self.filter_values:
-                    filter_value = self.filter_values.get(filter_data)
-                    if filter_value is not None:
-                        data_filtered[filter_key] = self.filter_data(
-                            input_data=data_filtered[filter_key],
-                            filter_key=filter_data,
-                            filter_value=filter_value,
-                            operator=self.operator,
-                        )
-            else:
-                msg = f"Filter key '{filter_key}' is not a list."
-                raise TypeError(msg)
-
-        return Data(**data_filtered)
-
     def append_update(self) -> Data:
         """Append or Update with new key-value pairs."""
         self.validate_single_data("Append or Update")
@@ -535,6 +439,12 @@ class DataOperationsComponent(Component):
 
     def json_path(self) -> Data:
         try:
+            import jq
+        except ImportError:
+            msg = "jq is required for Path Selection. Install with: pip install jq"
+            raise ImportError(msg) from None
+
+        try:
             if not self.data or not self.selected_key:
                 msg = "Missing input data or selected key."
                 raise ValueError(msg)
@@ -562,18 +472,24 @@ class DataOperationsComponent(Component):
             "Select Keys": self.select_keys,
             "Literal Eval": self.evaluate_data,
             "Combine": self.combine_data,
-            "Filter Values": self.multi_filter_data,
             "Append or Update": self.append_update,
             "Remove Keys": self.remove_keys,
             "Rename Keys": self.rename_keys,
             "Path Selection": self.json_path,
             "JQ Expression": self.json_query,
         }
-        handler: Callable[[], Data] | None = action_map.get(selected_actions[0])
-        if handler:
-            try:
-                return handler()
-            except Exception as e:
-                logger.error(f"Error executing {selected_actions[0]}: {e!s}")
-                raise
-        return Data(data={})
+        action_name = selected_actions[0]
+        handler: Callable[[], Data] | None = action_map.get(action_name)
+        if handler is None:
+            # Fail fast instead of silently returning empty data. Persisted flows
+            # may still reference a removed operation (e.g. "Filter Values").
+            msg = (
+                f"The '{action_name}' operation is no longer supported by the JSON Operations component. "
+                "Update this flow to use the Operations component."
+            )
+            raise ValueError(msg)
+        try:
+            return handler()
+        except Exception as e:
+            logger.error(f"Error executing {action_name}: {e!s}")
+            raise
